@@ -6,20 +6,20 @@ import { IBaseCoin } from '../baseCoin';
 import { BitGoBase } from '../bitgoBase';
 import { IEnterprise } from '../enterprise';
 import { getFirstPendingTransaction } from '../internal/internal';
-import { Affirmations, Settlements } from '../trading';
+import { Settlements, ISettlements, ISettlementAffirmations } from '../settlements';
 import { Wallet } from '../wallet';
 import { BitGoProofSignatures, EcdsaUtils } from '../utils/tss/ecdsa';
 import { DeserializedNtilde } from '../../account-lib/mpc/tss/ecdsa/types';
 
 export class Enterprise implements IEnterprise {
-  private readonly bitgo: BitGoBase;
-  private readonly baseCoin: IBaseCoin;
+  private readonly _bitgo: BitGoBase;
+  private readonly _baseCoin: IBaseCoin;
   readonly id: string;
   readonly name: string;
 
   constructor(bitgo: BitGoBase, baseCoin: IBaseCoin, enterpriseData: { id: string; name: string }) {
-    this.bitgo = bitgo;
-    this.baseCoin = baseCoin;
+    this._bitgo = bitgo;
+    this._baseCoin = baseCoin;
     if (!_.isObject(enterpriseData)) {
       throw new Error('enterpriseData has to be an object');
     }
@@ -38,7 +38,7 @@ export class Enterprise implements IEnterprise {
    * @param query
    */
   url(query = ''): string {
-    return this.bitgo.url(`/enterprise/${this.id}${query}`);
+    return this._bitgo.url(`/enterprise/${this.id}${query}`);
   }
 
   /**
@@ -46,7 +46,7 @@ export class Enterprise implements IEnterprise {
    * @param query
    */
   coinUrl(query = ''): string {
-    return this.baseCoin.url(`/enterprise/${this.id}${query}`);
+    return this._baseCoin.url(`/enterprise/${this.id}${query}`);
   }
 
   /**
@@ -54,9 +54,9 @@ export class Enterprise implements IEnterprise {
    * @param params
    */
   async coinWallets(params: Record<string, never> = {}): Promise<Wallet[]> {
-    const walletData = (await this.bitgo.get(this.baseCoin.url('/wallet/enterprise/' + this.id)).result()) as any;
+    const walletData = (await this._bitgo.get(this._baseCoin.url('/wallet/enterprise/' + this.id)).result()) as any;
     walletData.wallets = walletData.wallets.map((w) => {
-      return new Wallet(this.bitgo, this.baseCoin, w);
+      return new Wallet(this._bitgo, this._baseCoin, w);
     });
     return walletData;
   }
@@ -66,7 +66,7 @@ export class Enterprise implements IEnterprise {
    * @param params
    */
   async users(params: Record<string, never> = {}): Promise<any> {
-    return await this.bitgo.get(this.url('/user')).result();
+    return await this._bitgo.get(this.url('/user')).result();
   }
 
   /**
@@ -74,7 +74,7 @@ export class Enterprise implements IEnterprise {
    * @param params
    */
   async getFeeAddressBalance(params: Record<string, never> = {}): Promise<any> {
-    return await this.bitgo.get(this.coinUrl('/feeAddressBalance')).result();
+    return await this._bitgo.get(this.coinUrl('/feeAddressBalance')).result();
   }
 
   /**
@@ -82,7 +82,7 @@ export class Enterprise implements IEnterprise {
    * @param params
    */
   async addUser(params: any = {}): Promise<any> {
-    return await this.bitgo.post(this.url('/user')).send(params).result();
+    return await this._bitgo.post(this.url('/user')).send(params).result();
   }
 
   /**
@@ -90,7 +90,7 @@ export class Enterprise implements IEnterprise {
    * @param params
    */
   async removeUser(params: any = {}): Promise<any> {
-    return await this.bitgo.del(this.url('/user')).send(params).result();
+    return await this._bitgo.del(this.url('/user')).send(params).result();
   }
 
   /**
@@ -98,21 +98,21 @@ export class Enterprise implements IEnterprise {
    * @param params
    */
   async getFirstPendingTransaction(params: Record<string, never> = {}): Promise<any> {
-    return getFirstPendingTransaction({ enterpriseId: this.id }, this.baseCoin, this.bitgo);
+    return getFirstPendingTransaction({ enterpriseId: this.id }, this._baseCoin, this._bitgo);
   }
 
   /**
    * Manage settlements for an enterprise
    */
-  settlements(): Settlements {
-    return new Settlements(this.bitgo, this.id);
+  settlements(): ISettlements {
+    return new Settlements(this._bitgo, this.id);
   }
 
   /**
    * Manage affirmations for an enterprise
    */
-  affirmations(): Affirmations {
-    return new Affirmations(this.bitgo, this.id);
+  affirmations(): ISettlementAffirmations {
+    return this.settlements().affirmations;
   }
 
   /**
@@ -120,7 +120,7 @@ export class Enterprise implements IEnterprise {
    * @param userPassword - enterprise admin's login password
    */
   async verifyEcdsaBitGoChallengeProofs(userPassword: string): Promise<BitGoProofSignatures> {
-    return EcdsaUtils.getVerifyAndSignBitGoChallenges(this.bitgo, this.id, userPassword);
+    return EcdsaUtils.getVerifyAndSignBitGoChallenges(this._bitgo, this.id, userPassword);
   }
 
   /**
@@ -139,7 +139,7 @@ export class Enterprise implements IEnterprise {
     challenge?: DeserializedNtilde
   ): Promise<void> {
     await EcdsaUtils.initiateChallengesForEnterprise(
-      this.bitgo,
+      this._bitgo,
       this.id,
       userPassword,
       bitgoInstChallengeProofSignature,
@@ -155,7 +155,7 @@ export class Enterprise implements IEnterprise {
    */
   async getExistingTssEcdsaChallenge(): Promise<DeserializedNtilde> {
     const urlPath = `/enterprise/${this.id}/tssconfig`;
-    const tssConfig = await this.bitgo.get(this.bitgo.url(urlPath, 2)).send().result();
+    const tssConfig = await this._bitgo.get(this._bitgo.url(urlPath, 2)).send().result();
     const enterpriseChallenge = tssConfig?.ecdsa.challenge?.enterprise;
     if (!enterpriseChallenge) {
       throw new Error('No existing ECDSA challenge on the enterprise.');

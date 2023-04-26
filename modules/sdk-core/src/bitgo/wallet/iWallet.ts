@@ -12,7 +12,6 @@ import { BitGoBase } from '../bitgoBase';
 import { Keychain } from '../keychain';
 import { IPendingApproval, PendingApprovalData } from '../pendingApproval';
 import { IStakingWallet } from '../staking';
-import { ITradingAccount } from '../trading';
 import {
   CustomGShareGeneratingFunction,
   CustomRShareGeneratingFunction,
@@ -20,6 +19,7 @@ import {
   TokenTransferRecipientParams,
 } from '../utils';
 import { ILightning } from '../lightning';
+import { ISettlements } from '../settlements';
 
 export interface MaximumSpendableOptions {
   minValue?: number | string;
@@ -652,7 +652,6 @@ export interface IWallet {
   removePolicyRule(params?: RemovePolicyRuleOptions): Promise<any>;
   remove(params?: Record<string, never>): Promise<any>;
   toJSON(): WalletData;
-  toTradingAccount(): ITradingAccount;
   toStakingWallet(): IStakingWallet;
   downloadKeycard(params?: DownloadKeycardOptions): void;
   buildAccountConsolidations(params?: BuildConsolidationTransactionOptions): Promise<PrebuildTransactionResult[]>;
@@ -665,4 +664,5 @@ export interface IWallet {
   signMessage(params: WalletSignMessageOptions): Promise<SignedMessage>;
   signTypedData(params: WalletSignTypedDataOptions): Promise<SignedMessage>;
   fetchCrossChainUTXOs(params: FetchCrossChainUTXOsOptions): Promise<CrossChainUTXO[]>;
+  settlements?: ISettlements;
 }
