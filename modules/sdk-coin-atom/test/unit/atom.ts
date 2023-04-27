@@ -3,8 +3,8 @@ import { TestBitGo, TestBitGoAPI } from '@bitgo/sdk-test';
 import BigNumber from 'bignumber.js';
 import should = require('should');
 import sinon from 'sinon';
-
-import { Atom, Tatom } from '../../src';
+import { Atom, Tatom, Transaction } from '../../src';
+import { rangeProof, Ecdsa } from '@bitgo/sdk-core';
 import utils from '../../src/lib/utils';
 import {
   address,
@@ -13,7 +13,12 @@ import {
   TEST_UNDELEGATE_TX,
   TEST_WITHDRAW_REWARDS_TX,
   TEST_TX_WITH_MEMO,
+  wrwUser,
+  mockChallengeA,
 } from '../resources/atom';
+import { coins } from '@bitgo/statics';
+import { SendMessage } from '../../src/lib/iface';
+import { GAS_AMOUNT } from '../../src/lib/constants';
 
 describe('ATOM', function () {
   let bitgo: TestBitGoAPI;
@@ -334,6 +339,53 @@ describe('ATOM', function () {
         .parseTransaction({ txHex: TEST_SEND_TX.signedTxBase64 })
         .should.be.rejectedWith('Invalid transaction');
       stub.restore();
+    });
+  });
+
+  describe('Recover transactions: ', () => {
+    const sandBox = sinon.createSandbox();
+    const destinationAddress = wrwUser.destinationAddress;
+    const coin = coins.get('tatom');
+    const testBalance = '150000';
+    const testAccoutNumber = '123';
+    const testChainId = 'test-chain';
+
+    beforeEach(() => {
+      const accountBalance = sandBox.stub(Atom.prototype, 'getAccountBalance' as keyof Atom);
+      accountBalance.withArgs(wrwUser.senderAddress).resolves(testBalance);
+
+      const accountNumber = sandBox.stub(Atom.prototype, 'getAccountNumber' as keyof Atom);
+      accountNumber.withArgs(wrwUser.senderAddress).resolves(testAccoutNumber);
+
+      const chainId = sandBox.stub(Atom.prototype, 'getChainId' as keyof Atom);
+      chainId.withArgs().resolves(testChainId);
+
+      const serializedEntChallenge = mockChallengeA;
+      const deserializedEntChallenge = Ecdsa.deserializeNtilde(serializedEntChallenge);
+      sinon.stub(rangeProof, 'generateNtilde').resolves(deserializedEntChallenge);
+    });
+
+    it('should recover a txn for non-bitgo recoveries', async function () {
+      const res = await basecoin.recover({
+        userKey: wrwUser.userKey,
+        backupKey: wrwUser.backupKey,
+        bitgoKey: wrwUser.bitgoKey,
+        walletPassphrase: wrwUser.walletPassphrase,
+        recoveryDestination: destinationAddress,
+      });
+      res.should.not.be.empty();
+      res.should.hasOwnProperty('serializedTx');
+      res.should.hasOwnProperty('scanIndex');
+      sandBox.assert.calledOnce(basecoin.getAccountBalance);
+      sandBox.assert.calledOnce(basecoin.getAccountNumber);
+      sandBox.assert.calledOnce(basecoin.getChainId);
+
+      const atomTxn = new Transaction(coin);
+      atomTxn.enrichTransactionDetailsFromRawTransaction(res.serializedTx);
+      const atomTxnJson = atomTxn.toJson();
+      const sendMessage = atomTxnJson.sendMessages[0].value as SendMessage;
+      const actualBalance = Number(testBalance) - Number(GAS_AMOUNT);
+      should.equal(sendMessage.amount[0].amount, actualBalance.toString());
     });
   });
 });

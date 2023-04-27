@@ -2,6 +2,8 @@ import {
   BaseCoin,
   BaseTransaction,
   BitGoBase,
+  Ecdsa,
+  Environments,
   ExplanationResult,
   InvalidAddressError,
   InvalidMemoIdError,
@@ -16,17 +18,26 @@ import {
   UnexpectedAddressError,
   VerifyAddressOptions,
   VerifyTransactionOptions,
+  ECDSAMethodTypes,
+  ECDSA,
 } from '@bitgo/sdk-core';
 import { BaseCoin as StaticsBaseCoin, CoinFamily, coins } from '@bitgo/statics';
 import { bip32 } from '@bitgo/utxo-lib';
 import { BigNumber } from 'bignumber.js';
 import { createHash, Hash, randomBytes } from 'crypto';
 import * as _ from 'lodash';
-
 import { TransactionBuilderFactory } from './lib/transactionBuilderFactory';
 import utils from './lib/utils';
 import url from 'url';
 import querystring from 'querystring';
+import { isInteger } from 'lodash';
+import { KeyPair as AtomKeyPair, Transaction } from './lib';
+import * as request from 'superagent';
+import { Buffer } from 'buffer';
+import Keccak from 'keccak';
+import { FeeData, SendMessage } from './lib/iface';
+import { Coin } from '@cosmjs/stargate';
+import { GAS_AMOUNT, GAS_LIMIT } from './lib/constants';
 
 /**
  * Atom accounts support memo Id based addresses
@@ -41,6 +52,22 @@ interface AddressDetails {
  */
 interface AtomCoinSpecific {
   rootAddress: string;
+}
+
+interface RecoveryOptions {
+  userKey?: string; // Box A
+  backupKey?: string; // Box B
+  bitgoKey: string; // Box C
+  recoveryDestination: string;
+  krsProvider?: string;
+  walletPassphrase?: string;
+  startingScanIndex?: number;
+  scan?: number;
+}
+
+interface AtomTx {
+  serializedTx: string;
+  scanIndex: number;
 }
 
 export class Atom extends BaseCoin {
@@ -97,6 +124,10 @@ export class Atom extends BaseCoin {
   /** @inheritDoc **/
   isValidPrv(prv: string): boolean {
     return utils.isValidPrivateKey(prv);
+  }
+
+  getBuilder(): TransactionBuilderFactory {
+    return new TransactionBuilderFactory(coins.get(this.getChain()));
   }
 
   /** @inheritDoc **/
@@ -226,6 +257,223 @@ export class Atom extends BaseCoin {
     };
   }
 
+  /**
+   * Builds a funds recovery transaction without BitGo
+   * @param {RecoveryOptions} params parameters needed to construct and
+   * (maybe) sign the transaction
+   *
+   * @returns {AtomTx} the serialized transaction hex string and index
+   * of the address being swept
+   */
+  async recover(params: RecoveryOptions): Promise<AtomTx> {
+    let publicKey: string;
+    // Step 1: Check if params contains the required parameters
+    if (!params.bitgoKey) {
+      throw new Error('missing bitgoKey');
+    }
+
+    if (!params.recoveryDestination || !this.isValidAddress(params.recoveryDestination)) {
+      throw new Error('invalid recoveryDestination');
+    }
+
+    // Step 2: Fetch the starting scan index if its present (else 0)
+    let startIdx = params.startingScanIndex;
+    if (_.isUndefined(startIdx)) {
+      startIdx = 0;
+    } else if (!isInteger(startIdx) || startIdx < 0) {
+      throw new Error('Invalid starting index to scan for addresses');
+    }
+
+    // Step 3: Fetch the number of iterations from params if its present (else 20)
+    let numIteration = params.scan;
+    if (_.isUndefined(numIteration)) {
+      // magic number ? Why 20 ?
+      numIteration = 20;
+    } else if (!isInteger(numIteration) || numIteration <= 0) {
+      throw new Error('Invalid scanning factor');
+    }
+
+    // Step 4: Fetch the bitgo key from params
+    const bitgoKey = params.bitgoKey.replace(/\s/g, '');
+
+    // Step 5: Instantiate the ECDSA signer
+    const MPC = new Ecdsa();
+
+    // Step 6: For each account from the starting index till numIterations + starting index, fetch the build tx details
+    for (let i = startIdx; i < numIteration + startIdx; i++) {
+      const currPath = `m/${i}`;
+      publicKey = MPC.deriveUnhardened(bitgoKey, currPath).slice(0, 66);
+      const senderAddress = this.getAddressFromPublicKey(publicKey);
+      const balance = await this.getAccountBalance(senderAddress);
+
+      if (Number(balance) <= 0) {
+        continue;
+      }
+
+      const accountNumber = await this.getAccountNumber(senderAddress);
+      const chainId = await this.getChainId();
+      const gasBudget: FeeData = {
+        amount: [{ denom: 'uatom', amount: GAS_AMOUNT }],
+        gasLimit: GAS_LIMIT,
+      };
+      const actualBalance = Number(balance) - Number(gasBudget.amount[0].amount);
+      const amount: Coin[] = [
+        {
+          denom: 'uatom',
+          amount: actualBalance.toString(),
+        },
+      ];
+
+      const sendMessage: SendMessage[] = [
+        {
+          fromAddress: senderAddress,
+          toAddress: params.recoveryDestination,
+          amount: amount,
+        },
+      ];
+
+      // Step 7: Build the unsigned tx
+      const txnBuilder = this.getBuilder().getTransferBuilder();
+      txnBuilder
+        .messages(sendMessage)
+        .gasBudget(gasBudget)
+        .publicKey(publicKey)
+        .accountNumber(Number(accountNumber))
+        .chainId(chainId);
+      const unsignedTransaction = (await txnBuilder.build()) as Transaction;
+      let serializedTx = unsignedTransaction.toBroadcastFormat();
+      const signableHex = unsignedTransaction.signablePayload.toString('hex');
+
+      // Step 8: Validate necessary parameters required for performing recovery
+      if (!params.userKey) {
+        throw new Error('missing userKey');
+      }
+      if (!params.backupKey) {
+        throw new Error('missing backupKey');
+      }
+      if (!params.walletPassphrase) {
+        throw new Error('missing wallet passphrase');
+      }
+
+      const userKey = params.userKey.replace(/\s/g, '');
+      const backupKey = params.backupKey.replace(/\s/g, '');
+      const [userKeyCombined, backupKeyCombined] = ((): [
+        ECDSAMethodTypes.KeyCombined | undefined,
+        ECDSAMethodTypes.KeyCombined | undefined
+      ] => {
+        const [userKeyCombined, backupKeyCombined] = this.getKeyCombinedFromTssKeyShares(
+          userKey,
+          backupKey,
+          params.walletPassphrase
+        );
+        return [userKeyCombined, backupKeyCombined];
+      })();
+
+      if (!userKeyCombined || !backupKeyCombined) {
+        throw new Error('Missing key combined shares for user or backup');
+      }
+
+      // Step 9: Sign the tx
+      const signature = await this.signRecoveryTSS(userKeyCombined, backupKeyCombined, signableHex);
+      const atomKeyPair = new AtomKeyPair({ pub: publicKey });
+      txnBuilder.addSignature({ pub: atomKeyPair.getKeys().pub }, Buffer.from(signature.r + signature.s, 'hex'));
+      const signedTransaction = await txnBuilder.build();
+      serializedTx = signedTransaction.toBroadcastFormat();
+
+      return { serializedTx: serializedTx, scanIndex: i };
+    }
+    throw new Error('Did not find an address with funds to recover');
+  }
+
+  /**
+   * Get balance from public node
+   */
+  protected async getBalanceFromNode(senderAddress: string): Promise<request.Response> {
+    const nodeUrl = this.getPublicNodeUrl();
+    const getBalancePath = 'cosmos/bank/v1beta1/balances/';
+    const fullEndpoint = nodeUrl + getBalancePath + senderAddress;
+    try {
+      return await request.get(fullEndpoint).send();
+    } catch (e) {
+      console.debug(e);
+    }
+    throw new Error(`Unable to call endpoint ${getBalancePath + senderAddress} from node: ${nodeUrl}`);
+  }
+
+  /**
+   * Helper to fetch chainId
+   */
+  protected async getChainId(): Promise<string> {
+    const response = await this.getChainIdFromNode();
+    if (response.status !== 200) {
+      throw new Error('Account not found');
+    }
+    return response.body.block.header.chain_id;
+  }
+
+  /**
+   * Get chain id from public node
+   */
+  protected async getChainIdFromNode(): Promise<request.Response> {
+    const nodeUrl = this.getPublicNodeUrl();
+    const getLatestBlockPath = 'cosmos/base/tendermint/v1beta1/blocks/latest';
+    const fullEndpoint = nodeUrl + getLatestBlockPath;
+    try {
+      return await request.get(fullEndpoint).send();
+    } catch (e) {
+      console.debug(e);
+    }
+    throw new Error(`Unable to call endpoint ${getLatestBlockPath} from node: ${nodeUrl}`);
+  }
+
+  /**
+   * Helper to fetch account number
+   */
+  protected async getAccountNumber(senderAddress: string): Promise<string> {
+    const response = await this.getAccountFromNode(senderAddress);
+    if (response.status !== 200) {
+      throw new Error('Account not found');
+    }
+    return response.body.account.account_number;
+  }
+
+  /**
+   * Get account number from public node
+   */
+  protected async getAccountFromNode(senderAddress: string): Promise<request.Response> {
+    const nodeUrl = this.getPublicNodeUrl();
+    const getAccountPath = 'cosmos/auth/v1beta1/accounts/';
+    const fullEndpoint = nodeUrl + getAccountPath + senderAddress;
+    try {
+      return await request.get(fullEndpoint).send();
+    } catch (e) {
+      console.debug(e);
+    }
+    throw new Error(`Unable to call endpoint ${getAccountPath + senderAddress} from node: ${nodeUrl}`);
+  }
+
+  /**
+   * Helper to fetch account balance
+   */
+  protected async getAccountBalance(senderAddress: string): Promise<string> {
+    const response = await this.getBalanceFromNode(senderAddress);
+    if (response.status !== 200) {
+      throw new Error('Account not found');
+    }
+    return response.body.balances[0].amount;
+  }
+
+  /**
+   * Get the public node url from the Environments constant we have defined
+   */
+  protected getPublicNodeUrl(): string {
+    return Environments[this.bitgo.getEnv()].atomNodeUrl;
+  }
+
+  getAddressFromPublicKey(pubKey: string): string {
+    return new AtomKeyPair({ pub: pubKey }).getAddress();
+  }
+
   /** @inheritDoc **/
   async isWalletAddress(params: VerifyAddressOptions): Promise<boolean> {
     const addressDetails = this.getAddressDetails(params.address);
@@ -308,5 +556,135 @@ export class Atom extends BaseCoin {
       return false;
     }
     return memoIdNumber.gte(0);
+  }
+
+  private getKeyCombinedFromTssKeyShares(
+    userPublicOrPrivateKeyShare: string,
+    backupPrivateOrPublicKeyShare: string,
+    walletPassphrase?: string
+  ): [ECDSAMethodTypes.KeyCombined, ECDSAMethodTypes.KeyCombined] {
+    let backupPrv;
+    let userPrv;
+    try {
+      backupPrv = this.bitgo.decrypt({
+        input: backupPrivateOrPublicKeyShare,
+        password: walletPassphrase,
+      });
+      userPrv = this.bitgo.decrypt({
+        input: userPublicOrPrivateKeyShare,
+        password: walletPassphrase,
+      });
+    } catch (e) {
+      throw new Error(`Error decrypting backup keychain: ${e.message}`);
+    }
+
+    const userSigningMaterial = JSON.parse(userPrv) as ECDSAMethodTypes.SigningMaterial;
+    const backupSigningMaterial = JSON.parse(backupPrv) as ECDSAMethodTypes.SigningMaterial;
+
+    if (!userSigningMaterial.backupNShare) {
+      throw new Error('Invalid user key - missing backupNShare');
+    }
+
+    if (!backupSigningMaterial.userNShare) {
+      throw new Error('Invalid backup key - missing userNShare');
+    }
+
+    const MPC = new Ecdsa();
+
+    const userKeyCombined = MPC.keyCombine(userSigningMaterial.pShare, [
+      userSigningMaterial.bitgoNShare,
+      userSigningMaterial.backupNShare,
+    ]);
+    const backupKeyCombined = MPC.keyCombine(backupSigningMaterial.pShare, [
+      backupSigningMaterial.bitgoNShare,
+      backupSigningMaterial.userNShare,
+    ]);
+
+    if (
+      userKeyCombined.xShare.y !== backupKeyCombined.xShare.y ||
+      userKeyCombined.xShare.chaincode !== backupKeyCombined.xShare.chaincode
+    ) {
+      throw new Error('Common keychains do not match');
+    }
+
+    return [userKeyCombined, backupKeyCombined];
+  }
+
+  private async signRecoveryTSS(
+    userKeyCombined: ECDSA.KeyCombined,
+    backupKeyCombined: ECDSA.KeyCombined,
+    txHex: string
+  ): Promise<ECDSAMethodTypes.Signature> {
+    const MPC = new Ecdsa();
+    const signerOneIndex = userKeyCombined.xShare.i;
+    const signerTwoIndex = backupKeyCombined.xShare.i;
+
+    const userXShare: ECDSAMethodTypes.XShareWithNtilde = (
+      await MPC.appendChallenge(userKeyCombined.xShare, userKeyCombined.yShares[signerTwoIndex])
+    ).xShare;
+    const userYShare: ECDSAMethodTypes.YShareWithNtilde = {
+      ...userKeyCombined.yShares[signerTwoIndex],
+      ntilde: userXShare.ntilde,
+      h1: userXShare.h1,
+      h2: userXShare.h2,
+    };
+    const backupXShare: ECDSAMethodTypes.XShareWithNtilde = {
+      ...backupKeyCombined.xShare,
+      ntilde: userXShare.ntilde,
+      h1: userXShare.h1,
+      h2: userXShare.h2,
+    };
+    const backupYShare: ECDSAMethodTypes.YShareWithNtilde = {
+      ...backupKeyCombined.yShares[signerOneIndex],
+      ntilde: backupXShare.ntilde,
+      h1: backupXShare.h1,
+      h2: backupXShare.h2,
+    };
+
+    const signShares: ECDSA.SignShareRT = await MPC.signShare(userXShare, userYShare);
+
+    let signConvertS21: ECDSA.SignConvertRT = await MPC.signConvert({
+      xShare: backupXShare,
+      yShare: backupYShare, // YShare corresponding to the other participant signerOne
+      kShare: signShares.kShare,
+    });
+
+    const signConvertS12: ECDSA.SignConvertRT = await MPC.signConvert({
+      aShare: signConvertS21.aShare,
+      wShare: signShares.wShare,
+    });
+
+    signConvertS21 = await MPC.signConvert({
+      muShare: signConvertS12.muShare,
+      bShare: signConvertS21.bShare,
+    });
+
+    const [signCombineOne, signCombineTwo] = [
+      MPC.signCombine({
+        gShare: signConvertS12.gShare as ECDSA.GShare,
+        signIndex: {
+          i: (signConvertS12.muShare as ECDSA.MUShare).i,
+          j: (signConvertS12.muShare as ECDSA.MUShare).j,
+        },
+      }),
+      MPC.signCombine({
+        gShare: signConvertS21.gShare as ECDSA.GShare,
+        signIndex: {
+          i: (signConvertS21.muShare as ECDSA.MUShare).i,
+          j: (signConvertS21.muShare as ECDSA.MUShare).j,
+        },
+      }),
+    ];
+
+    const MESSAGE = Buffer.from(txHex, 'hex');
+
+    const [signA, signB] = [
+      MPC.sign(MESSAGE, signCombineOne.oShare, signCombineTwo.dShare, Keccak('keccak256')),
+      MPC.sign(MESSAGE, signCombineTwo.oShare, signCombineOne.dShare, Keccak('keccak256')),
+    ];
+
+    const signature = MPC.constructSignature([signA, signB]);
+
+    return signature;
   }
 }
