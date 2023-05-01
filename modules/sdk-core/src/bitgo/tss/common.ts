@@ -95,7 +95,7 @@ export async function commonVerifyWalletSignature(params: {
     throw new Error('Invalid HSM GPG signature');
   }
 
-  const verificationResult = await walletSignature.verifyPrimaryUser([bitgoPub]);
+  const verificationResult = await walletSignature.verifyPrimaryUser([bitgoPub], null as unknown as undefined);
   const isValid = verificationResult.some((result) => result.valid);
   if (!isValid) {
     throw new Error('Invalid HSM GPG signature');
