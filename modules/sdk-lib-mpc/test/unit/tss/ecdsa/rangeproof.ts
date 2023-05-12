@@ -1,9 +1,8 @@
 import * as sinon from 'sinon';
 import * as paillierBigint from 'paillier-bigint';
-import { RangeProof, EcdsaTypes } from '../../../../src/tss/ecdsa';
+import { EcdsaRangeProof, EcdsaTypes } from '../../../../src/tss/ecdsa';
 import { OpenSSL } from '../../../../src/openssl';
 import { Secp256k1Curve } from '../../../../src/curves/secp256k1';
-import { Ecdsa } from '@bitgo/sdk-core';
 
 describe('MtA range proof', function () {
   const curve = new Secp256k1Curve();
@@ -26,7 +25,7 @@ describe('MtA range proof', function () {
     });
 
     paillierKeyPair = await paillierBigint.generateRandomKeys(2048, true);
-    ntilde = await RangeProof.generateNtilde(512);
+    ntilde = await EcdsaRangeProof.generateNtilde(512);
   });
 
   after(function () {
@@ -36,10 +35,10 @@ describe('MtA range proof', function () {
 
   it('valid range proof', async function () {
     const k = curve.scalarRandom();
-    const rk = await RangeProof.randomCoPrimeTo(paillierKeyPair.publicKey.n);
+    const rk = await EcdsaRangeProof.randomCoPrimeTo(paillierKeyPair.publicKey.n);
     const ck = paillierKeyPair.publicKey.encrypt(k, rk);
 
-    const proof = await RangeProof.prove(
+    const proof = await EcdsaRangeProof.prove(
       curve,
       2048,
       paillierKeyPair.publicKey,
@@ -53,7 +52,7 @@ describe('MtA range proof', function () {
       rk
     );
 
-    RangeProof.verify(
+    EcdsaRangeProof.verify(
       curve,
       2048,
       paillierKeyPair.publicKey,
@@ -69,11 +68,11 @@ describe('MtA range proof', function () {
 
   it('encrypted value too big', async function () {
     // Pick k based on attack described in https://eprint.iacr.org/2021/1621.pdf, where M = 2^29 is chosen.
-    const k = (BigInt(2) * (BigInt(2) ^ BigInt(29)) * paillierKeyPair.publicKey.n) / Ecdsa.curve.order();
-    const rk = await RangeProof.randomCoPrimeTo(paillierKeyPair.publicKey.n);
+    const k = (BigInt(2) * (BigInt(2) ^ BigInt(29)) * paillierKeyPair.publicKey.n) / curve.order();
+    const rk = await EcdsaRangeProof.randomCoPrimeTo(paillierKeyPair.publicKey.n);
     const ck = paillierKeyPair.publicKey.encrypt(k, rk);
 
-    const proof = await RangeProof.prove(
+    const proof = await EcdsaRangeProof.prove(
       curve,
       2048,
       paillierKeyPair.publicKey,
@@ -87,7 +86,7 @@ describe('MtA range proof', function () {
       rk
     );
 
-    RangeProof.verify(
+    EcdsaRangeProof.verify(
       curve,
       2048,
       paillierKeyPair.publicKey,

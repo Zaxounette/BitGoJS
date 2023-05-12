@@ -2,6 +2,7 @@
  * Zero Knowledge Range Proofs as described in (Two-party generation of DSA signatures)[1].
  * [1]: https://reitermk.github.io/papers/2004/IJIS.pdf
  */
+import { EcdsaRangeProof } from '@bitgo/sdk-lib-mpc';
 import { createHash } from 'crypto';
 import BaseCurve from '../../curves';
 import { PublicKey } from 'paillier-bigint';
@@ -261,14 +262,7 @@ export async function prove(
 }
 
 /**
- * Verify a zero-knowledge range proof that an encrypted value is "small".
- * @param {BaseCurve} curve An elliptic curve to use for group operations.
- * @param {number} modulusBits The bit count of the prover's public key.
- * @param {PublicKey} pk The prover's public key.
- * @param {DeserializedNtilde} ntilde The verifier's Ntilde values.
- * @param {RangeProof} proof The range proof.
- * @param {bigint} c The ciphertext.
- * @returns {boolean} True if verification succeeds.
+ * Docs described in `EcdsaRangeProof.verify`
  * @deprecated use verify from sdk-lib-mpc instead
  */
 export function verify(
@@ -279,40 +273,7 @@ export function verify(
   proof: RangeProof,
   c: bigint
 ): boolean {
-  const modulusBytes = Math.floor((modulusBits + 7) / 8);
-  const q = curve.order();
-  const q3 = q ** BigInt(3);
-  if (proof.s1 > q3) {
-    return false;
-  }
-  const hash = createHash('sha256');
-  hash.update('\x06\x00\x00\x00\x00\x00\x00\x00');
-  hash.update(bigIntToBufferBE(pk.n, modulusBytes));
-  hash.update('$');
-  hash.update(bigIntToBufferBE(pk.g, modulusBytes));
-  hash.update('$');
-  hash.update(bigIntToBufferBE(c, 2 * modulusBytes));
-  hash.update('$');
-  hash.update(bigIntToBufferBE(proof.z, modulusBytes));
-  hash.update('$');
-  hash.update(bigIntToBufferBE(proof.u, 2 * modulusBytes));
-  hash.update('$');
-  hash.update(bigIntToBufferBE(proof.w, modulusBytes));
-  hash.update('$');
-  const e = bigIntFromBufferBE(hash.digest()) % q;
-  let products: bigint;
-  products = (modPow(pk.g, proof.s1, pk._n2) * modPow(proof.s, pk.n, pk._n2) * modPow(c, -e, pk._n2)) % pk._n2;
-  if (proof.u !== products) {
-    return false;
-  }
-  products =
-    (((modPow(ntilde.h1, proof.s1, ntilde.ntilde) * modPow(ntilde.h2, proof.s2, ntilde.ntilde)) % ntilde.ntilde) *
-      modPow(proof.z, -e, ntilde.ntilde)) %
-    ntilde.ntilde;
-  if (proof.w !== products) {
-    return false;
-  }
-  return true;
+  return EcdsaRangeProof.verify(curve, modulusBits, pk, ntilde, proof, c);
 }
 
 /**

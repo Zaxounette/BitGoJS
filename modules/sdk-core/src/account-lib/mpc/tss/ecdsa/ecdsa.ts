@@ -9,6 +9,7 @@ import { bigIntFromBufferBE, bigIntFromU8ABE, bigIntToBufferBE, getPaillierPubli
 import { Secp256k1Curve } from '../../curves';
 import Shamir from '../../shamir';
 import * as rangeProof from './rangeproof';
+import { EcdsaRangeProof } from '@bitgo/sdk-lib-mpc';
 import {
   AShare,
   BShare,
@@ -540,7 +541,7 @@ export default class Ecdsa {
       }
       const k = hexToBigInt(aShareToBeSent.k);
       if (
-        !rangeProof.verify(
+        !EcdsaRangeProof.verify(
           Ecdsa.curve,
           3072,
           pka,
