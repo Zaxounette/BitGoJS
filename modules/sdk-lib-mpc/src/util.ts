@@ -25,3 +25,7 @@ export function bigIntToBufferBE(n: bigint, bytes?: number): Buffer {
 export function bigIntFromBufferBE(buf: Buffer): bigint {
   return BigInt('0x' + buf.toString('hex'));
 }
+
+export function bigIntFromU8ABE(buf: Uint8Array): bigint {
+  return bigIntFromBufferBE(Buffer.from(buf));
+}

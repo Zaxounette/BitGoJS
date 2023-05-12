@@ -4,9 +4,6 @@ import * as secp from '@noble/secp256k1';
 
 const order = secp.CURVE.n;
 
-/**
- * @deprecated use Secp256k1Curve from sdk-lib-mpc instead
- */
 export class Secp256k1Curve implements BaseCurve {
   scalarRandom(): bigint {
     return bigIntFromU8ABE(secp.utils.randomPrivateKey());

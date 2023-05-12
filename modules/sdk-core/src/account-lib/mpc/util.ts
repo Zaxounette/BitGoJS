@@ -31,6 +31,10 @@ export function bigIntFromBufferBE(buf: Buffer): bigint {
   return BigInt('0x' + buf.toString('hex'));
 }
 
+/**
+ * @deprecated Use bigIntFromU8ABE from sdk-lib-mpc instead
+ * @param buf
+ */
 export function bigIntFromU8ABE(buf: Uint8Array): bigint {
   return bigIntFromBufferBE(Buffer.from(buf));
 }
